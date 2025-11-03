@@ -1,0 +1,208 @@
+---
+title: A-Ops安装使用
+author: JDLihoo
+date: 2025-10-10
+category: Jekyll
+layout: post
+published: false
+---
+![picture 0](../images/gala-gopher.png#pic_center)
+gala-gopher会将指标数据metrics输出到prometheus，将元数据metadata、异常事件event输出到kafka，灰色部分的gala-anteater和gala-spider会从prometheus和kafka获取数据。
+## gala-gopher部署
+### 源码编译运行
+https://gitee.com/openeuler/gala-gopher  
+
+执行gala-gopher前需要先设置文件权限
+```
+cd /opt/gala-gopher/extend_probes
+chmod 777 cadvisor_probe.py
+```
+
+运行 `gala-gopher`
+
+修改配置：  
+`vim /etc/gala-gopher/gala-gopher.conf`    
+元数据metadata、异常事件event要输出到kafka  
+```
+event =
+{
+    out_channel = "kafka";          # logs | kafka
+    kafka_topic = "gala_gopher_event";
+    timeout = 600;  # 10min
+};
+
+meta =
+{
+    out_channel = "kafka";          # logs | kafka
+    kafka_topic = "gala_gopher_metadata";
+};
+
+kafka_broker = "10.137.10.xx:9092";
+```
+
+### 验证安装是否成功
+`curl http://localhost:8888`
+如果返回没有报错，则部署成功
+
+### 运行一个容器用于测试
+可以用nginx
+```
+docker run -d --name nginx-chaos --privileged --pid=host --network=host -v /:/host -v /etc/localtime:/etc/localtime:ro -v /sys:/sys -v /usr/lib/debug:/usr/lib/debug -v /var/lib/docker:/var/lib/docker -v /opt:/opt -e GOPHER_HOST_PATH=/host nginx:latest
+```
+```
+docker run -d --name gala-gopher --privileged --pid=host --network=host \
+-v /:/host -v /etc/localtime:/etc/localtime:ro -v /sys:/sys \
+-v /usr/lib/debug:/usr/lib/debug -v /var/lib/docker:/var/lib/docker \
+-e GOPHER_HOST_PATH=/host \
+hub.oepkgs.net/a-ops/gala-gopher-x86_64
+```
+
+## gala-anteater部署
+前置需要安装Prometheus和kafka
+### Prometheus
+```
+yum install prometheus2 -y
+vim /etc/prometheus/prometheus.yml
+```
+抓取监控数据的目标地址设置为gala-gopher的地址
+```
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: 'gala-gopher'
+
+    # Override the global default and scrape targets from this job every 5 seconds.
+    # 这里设置为15s，因为gala-gopher的探针采集间隔约7-12s
+    scrape_interval: 15s
+    scrape_timeout: 15s
+
+    # metrics_path defaults to '/metrics'
+    # scheme defaults to 'http'.
+
+    static_configs:
+      - targets: ['localhost:8888', '192.168.140.132:8888']
+```
+启动Prometheus：  
+`systemctl start prometheus`  
+
+本机浏览器上登录
+http://192.168.140.132:9090/targets
+若连接不上，检查服务器的防火墙
+```
+# 是否有9090端口
+firewall-cmd --list-ports
+# 若没有，则
+firewall-cmd --add-port=8888/tcp --permanent
+firewall-cmd --reload
+```
+
+如果出现204问题，查看是不是已经curl -X PUT了相应相应探测的容器，prometheus收不到数据就会204.  
+
+### kafka
+```
+yum install zookeeper -y
+systemctl start zookeeper
+
+yum install kafka -y
+vim /opt/kafka/config/server.properties
+```
+修改listeners 为本机ip
+```
+############################# Socket Server Settings #############################
+
+# The address the socket server listens on. It will get the value returned from
+# java.net.InetAddress.getCanonicalHostName() if not configured.
+#   FORMAT:
+#     listeners = listener_name://host_name:port
+#   EXAMPLE:
+#     listeners = PLAINTEXT://your.host.name:9092
+#listeners=PLAINTEXT://:9092
+listeners=PLAINTEXT://192.168.140.132:9092
+```
+tmux 后台运行kafka服务:
+```
+cd /opt/kafka/bin
+./kafka-server-start.sh ../config/server.properties
+```
+
+## yum安装gala-anteater
+https://gitee.com/openeuler/gala-anteater
+```
+yum install gala-anteater
+```
+修改配置文件，主要关注kafka和Prometheus的ip:端口
+`/etc/gala-anteater/config/gala-anteater.yaml`
+```
+Kafka:
+  server: "192.168.140.132"
+  port: "9092"
+  model_topic: "gala_anteater_hybrid_model"
+  rca_topic: "gala_cause_inference"
+  meta_topic: "gala_gopher_metadata"
+  group_id: "gala_anteater_kafka"
+  # auth_type: plaintext/sasl_plaintext, please set "" for no auth
+  auth_type: ""
+  username: ""
+  password: ""
+```
+启动gala-anteater
+`systemctl start gala-anteater`
+
+报错：
+```
+ModuleNotFoundError: No module named 'pingouin'
+```
+
+运行
+```
+gala-anteater -ks 192.168.140.132 -kp 9092 -ps 192.168.140.132 -pp 9090 -m vae -r True -l 7 -t 0.6 -sli 400
+```
+
+查看日志
+`/var/log/gala-anteater/gala-anteater.log`
+
+
+## gala-anteater测试
+### 故障注入
+https://github.com/chaosblade-io/chaosblade.git
+
+安装包下载：  
+https://github.com/chaosblade-io/chaosblade/releases
+```
+wget https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/1.8.0/chaosblade-1.8.0-linux_amd64.tar.gz
+# Extract and install
+tar -xzf chaosblade-1.8.0-[platform].tar.gz
+cd chaosblade-1.8.0-[platform]
+
+# Verify installation
+./blade version
+```
+
+故障注入：  
+`./blade create cpu fullload`  
+返回：  
+`{"code":200,"success":true,"result":"3f1cd351050d1729"}`  
+结束：  
+`./blade destroy 3f1cd351050d1729`  
+
+### 创建容器
+需要创建一个容器，在容器内运行chaosblade，再指定给gala-gopher，让其去探测该容器，这样才能检测到容器问题，才会输出异常事件event等数据。  
+```
+docker run -it -d --name ubuntu-chaos ubuntu:latest /bin/bash
+apt update
+apt install -y wget
+wget https://chaosblade.oss-cn-hangzhou.aliyuncs.com/agent/github/1.8.0/chaosblade-1.8.0-linux_amd64.tar.gz
+tar -xzf chaosblade-1.8.0-linux_amd64.tar.gz
+cd chaosblade-1.8.0-linux_amd64
+./blade version
+```
+
+## 参考链接
+> https://docs.openeuler.org/zh/docs/22.03_LTS_SP3/docs/A-Ops/AOps%E9%83%A8%E7%BD%B2%E6%8C%87%E5%8D%97.html
+
+> https://docs.openeuler.org/zh/docs/22.03_LTS_SP3/docs/A-Ops/gala-anteater%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.html
+
+> https://docs.openeuler.org/zh/docs/24.03_LTS_SP2/server/maintenance/gala/using_gala_anteater.html#%E5%AE%89%E8%A3%85
+
+> https://blog.csdn.net/Maogaopeng/article/details/148306147
+
+> https://blog.csdn.net/varyall/article/details/115875965
