@@ -121,6 +121,47 @@ for ($i=1; $i -le $total_connections; $i++) {
 
 Write-Host "已发起 20 个连接请求，请在虚拟机执行 netstat 检查。"
 ```
+如果第二台机子是linux服务器，则通过iperf3打流
+```
+yum install iperf3
+
+# 服务端运行（记得firewall打开5201端口）
+iperf3 -s
+# 客户端运行（内网需要自己用socat映射端口，5201端口映射到51端口，虚拟机51端口对应物理机22051端口）
+iperf3 -c 192.168.140.132 -p 5201 -i 1 -t 100 -P 10
+
+# 要在/etc/nginx/conf.d/test.conf添加5201端口
+
+stream {
+    upstream iperf3_backend {
+        server 127.0.0.1:5201; # 转发给本地真正的 iperf3 服务端
+    }
+
+    server {
+        listen 192.168.140.132:500; # 监听你要求的 500 端口
+        proxy_pass iperf3_backend;
+        proxy_timeout 10m;
+        proxy_connect_timeout 1s;
+    }
+}
+
+# 同时要调整/etc/nginx/nginx.conf里include的层级关系（放到http{}外面）
+
+events {
+    worker_connections  1024;
+}
+
+include /etc/nginx/conf.d/*.conf;
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+$ systemctl restart nginx
+
+# 在客户端就可以直接对500端口进行打流
+iperf3 -c 192.168.140.132 -p 500 -i 1 -t 100 -P 10
+```
 
 在linux虚拟机查看建立链接数：
 ```
