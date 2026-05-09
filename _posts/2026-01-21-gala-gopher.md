@@ -6,6 +6,7 @@ category: Jekyll
 layout: post
 published: false
 ---
+# 问题1
 ## 问题描述
 当nginx实际链接数达到20时，gala-gopher采集到的链接数只有3
 
@@ -191,4 +192,48 @@ curl -X PUT http://localhost:9999/nginx -d json='
     },
     "state":"running"
 }'
+```
+
+# 问题2
+> https://atomgit.com/openeuler/gala-gopher/issues/433
+
+将metric配置为kafka
+```
+metric =
+{
+    out_channel = "kafka";     # web_server | json | logs | kafka
+    kafka_topic = "gala_gopher_metric";
+};
+```
+使用tcp探针进行测试，启动tcp探针，会出现core dump
+```
+./bin/kafka-console-consumer.sh --bootstrap-server 192.168.140.132:9092 --topic gala_gopher_metric --from-beginning
+```
+
+core分析
+```
+coredumpctl list
+coredumpctl dump 28199 -o gala_gopher_crash.core
+gdb /usr/bin/gala-gopher gala_gopher_crash.core
+```
+将metric配置为web_server，可以正常看到metric数据
+```
+curl http://localhost:8888
+```
+查看探针状态
+```
+curl -X GET http://localhost:9999/tcp
+```
+
+编译
+```
+cd /home/atomgit/gala-gopher
+sh build.sh --clean
+sh build.sh --debug
+sh install.sh
+```
+修改配置
+```
+/etc/gala-gopher/gala-gopher.conf
+# 参考配置/etc/gala-gopher/gala-gopher.conf.rpmsave
 ```
